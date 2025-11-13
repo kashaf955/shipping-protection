@@ -60,34 +60,49 @@ router.delete("/:checkoutId/fee", async (req, res, next) => {
     const { checkoutId } = req.params;
     const removalResult = await removeShippingInsuranceFee(checkoutId);
     
-    // Always return success for removal attempts (idempotent operation)
-    // Fee not found, already removed, or removal failed all return success
-    if (!removalResult.removed) {
+    // Success cases: fee was removed, or fee not found (already removed)
+    if (removalResult.removed) {
+      return res.json({
+        success: true,
+        data: removalResult,
+      });
+    }
+    
+    // Idempotent success: fee not found or no fees (already removed)
+    if (removalResult.reason === "not_found" || removalResult.reason === "no_fees") {
       return res.json({
         success: true,
         data: { 
           removed: false, 
-          reason: removalResult.reason || "not_found",
-          message: "Fee not found or already removed",
-          error: removalResult.error
+          reason: removalResult.reason,
+          message: "Fee not found or already removed"
         },
       });
     }
     
+    // Actual failure: removal failed
+    if (removalResult.reason === "removal_failed") {
+      return res.status(500).json({
+        success: false,
+        error: removalResult.error || "Failed to remove fee from BigCommerce",
+        data: removalResult
+      });
+    }
+    
+    // Default: treat as success (idempotent)
     res.json({
       success: true,
       data: removalResult,
     });
   } catch (error) {
-    // Even if there's an unexpected error, return success with message
-    // This makes the operation idempotent
+    // Unexpected errors return error status
     console.error("Unexpected error in fee removal:", error);
-    res.json({
-      success: true,
+    res.status(500).json({
+      success: false,
+      error: error.message || "Failed to remove fee",
       data: {
         removed: false,
         reason: "error",
-        message: "Fee may already be removed or checkout state changed",
         error: error.message
       }
     });

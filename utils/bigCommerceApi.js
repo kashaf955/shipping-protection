@@ -109,7 +109,9 @@ export async function addShippingInsuranceFee(checkoutId, subtotal) {
 
 export async function removeShippingInsuranceFee(checkoutId) {
   try {
+    console.log(`🔍 Starting fee removal for checkout: ${checkoutId}`);
     const checkout = await getCheckout(checkoutId);
+    
     // Try multiple possible locations for fees
     const fees =
       checkout?.data?.fees ??
@@ -117,10 +119,20 @@ export async function removeShippingInsuranceFee(checkoutId) {
       checkout?.fees ??
       [];
 
+    console.log(`📋 Found ${Array.isArray(fees) ? fees.length : 0} fee(s) in checkout`);
+    
     if (!Array.isArray(fees) || fees.length === 0) {
       console.log("ℹ️ No fees found in checkout");
       return { removed: false, reason: "no_fees" };
     }
+
+    // Log all fees for debugging
+    console.log("📋 All fees:", fees.map(f => ({
+      id: f.id,
+      name: f.name,
+      display_name: f.display_name,
+      type: f.type
+    })));
 
     // Find all shipping insurance fees (in case there are multiple)
     const feesToRemove = fees.filter(
@@ -131,6 +143,9 @@ export async function removeShippingInsuranceFee(checkoutId) {
         fee.id // Only remove fees that have an ID
     );
 
+    console.log(`🎯 Found ${feesToRemove.length} shipping insurance fee(s) to remove:`, 
+      feesToRemove.map(f => ({ id: f.id, name: f.name })));
+
     if (feesToRemove.length === 0) {
       console.log("ℹ️ No shipping insurance fee found to remove");
       return { removed: false, reason: "not_found" };
@@ -139,8 +154,11 @@ export async function removeShippingInsuranceFee(checkoutId) {
     // Remove all matching fees (usually just one, but handle multiple)
     const removalPromises = feesToRemove.map(async (fee) => {
       try {
+        const deleteUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${fee.id}`;
+        console.log(`🗑️ Attempting to DELETE fee ${fee.id} from: ${deleteUrl}`);
+        
         const response = await fetchWithTimeout(
-          `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${fee.id}`,
+          deleteUrl,
           {
             method: "DELETE",
             headers: {
@@ -151,6 +169,8 @@ export async function removeShippingInsuranceFee(checkoutId) {
           },
           15000
         );
+
+        console.log(`📡 DELETE response status: ${response.status} for fee ${fee.id}`);
 
         // 204 No Content means successful deletion
         // 404 means fee was already removed (treat as success)
@@ -170,9 +190,9 @@ export async function removeShippingInsuranceFee(checkoutId) {
             errorText = await response.text();
           }
           console.error(
-            `Failed to remove fee ${fee.id}: ${response.status} - ${JSON.stringify(errorText)}`
+            `❌ Failed to remove fee ${fee.id}: ${response.status} - ${JSON.stringify(errorText)}`
           );
-          // Don't throw for non-critical errors, just log
+          // Return failure for actual errors
           return { 
             success: false, 
             feeId: fee.id, 
@@ -183,7 +203,7 @@ export async function removeShippingInsuranceFee(checkoutId) {
 
         return { success: true, feeId: fee.id };
       } catch (error) {
-        console.error(`Error removing fee ${fee.id}:`, error.message);
+        console.error(`❌ Error removing fee ${fee.id}:`, error.message);
         return { success: false, feeId: fee.id, error: error.message };
       }
     });
