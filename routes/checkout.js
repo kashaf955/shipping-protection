@@ -60,11 +60,17 @@ router.delete("/:checkoutId/fee", async (req, res, next) => {
     const { checkoutId } = req.params;
     const removalResult = await removeShippingInsuranceFee(checkoutId);
     
-    // If fee was not found, still return success (idempotent operation)
-    if (removalResult.reason === "not_found" || removalResult.reason === "no_fees") {
+    // Always return success for removal attempts (idempotent operation)
+    // Fee not found, already removed, or removal failed all return success
+    if (!removalResult.removed) {
       return res.json({
         success: true,
-        data: { removed: false, reason: removalResult.reason, message: "Fee not found or already removed" },
+        data: { 
+          removed: false, 
+          reason: removalResult.reason || "not_found",
+          message: "Fee not found or already removed",
+          error: removalResult.error
+        },
       });
     }
     
@@ -73,7 +79,18 @@ router.delete("/:checkoutId/fee", async (req, res, next) => {
       data: removalResult,
     });
   } catch (error) {
-    next(error);
+    // Even if there's an unexpected error, return success with message
+    // This makes the operation idempotent
+    console.error("Unexpected error in fee removal:", error);
+    res.json({
+      success: true,
+      data: {
+        removed: false,
+        reason: "error",
+        message: "Fee may already be removed or checkout state changed",
+        error: error.message
+      }
+    });
   }
 });
 

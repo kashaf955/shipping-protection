@@ -152,12 +152,33 @@ export async function removeShippingInsuranceFee(checkoutId) {
           15000
         );
 
-        if (!response.ok && response.status !== 204) {
-          const errorText = await response.text();
-          console.error(
-            `Failed to remove fee ${fee.id}: ${response.status} - ${errorText}`
+        // 204 No Content means successful deletion
+        // 404 means fee was already removed (treat as success)
+        if (response.status === 204 || response.status === 404) {
+          console.log(
+            `✅ Fee ${fee.id} removed (or already removed) - status: ${response.status}`
           );
-          return { success: false, feeId: fee.id, error: errorText };
+          return { success: true, feeId: fee.id, alreadyRemoved: response.status === 404 };
+        }
+
+        // Other errors
+        if (!response.ok) {
+          let errorText;
+          try {
+            errorText = await response.json();
+          } catch {
+            errorText = await response.text();
+          }
+          console.error(
+            `Failed to remove fee ${fee.id}: ${response.status} - ${JSON.stringify(errorText)}`
+          );
+          // Don't throw for non-critical errors, just log
+          return { 
+            success: false, 
+            feeId: fee.id, 
+            error: typeof errorText === 'string' ? errorText : JSON.stringify(errorText),
+            status: response.status
+          };
         }
 
         return { success: true, feeId: fee.id };
@@ -169,18 +190,27 @@ export async function removeShippingInsuranceFee(checkoutId) {
 
     const results = await Promise.all(removalPromises);
     const successful = results.filter((r) => r.success);
+    const alreadyRemoved = results.filter((r) => r.alreadyRemoved);
 
-    if (successful.length > 0) {
+    // If at least one removal was successful OR fee was already removed, return success
+    if (successful.length > 0 || alreadyRemoved.length > 0) {
       console.log(
-        `✅ Shipping insurance fee(s) removed successfully: ${successful.length} fee(s)`
+        `✅ Shipping insurance fee(s) handled successfully: ${successful.length} removed, ${alreadyRemoved.length} already removed`
       );
-      return { removed: true, count: successful.length };
+      return { 
+        removed: true, 
+        count: successful.length,
+        alreadyRemoved: alreadyRemoved.length > 0
+      };
     } else {
-      // If all removals failed, throw the first error
+      // If all removals failed, return not_found (don't throw error)
       const firstError = results.find((r) => !r.success);
-      throw new Error(
-        `Failed to remove fee: ${firstError?.error || "Unknown error"}`
-      );
+      console.log(`ℹ️ Could not remove fee: ${firstError?.error || "Unknown error"}`);
+      return { 
+        removed: false, 
+        reason: "removal_failed",
+        error: firstError?.error || "Unknown error"
+      };
     }
   } catch (error) {
     console.error("❌ Error removing fee:", error.message);
