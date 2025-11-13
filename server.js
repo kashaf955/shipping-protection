@@ -1,6 +1,9 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import checkoutRoutes from "./routes/checkout.js";
 
 dotenv.config();
@@ -24,6 +27,23 @@ app.use(
 );
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve widget script
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+app.get("/widget.js", (req, res) => {
+  try {
+    const widgetPath = join(__dirname, "shipping-insurance-widget.js");
+    const widgetCode = readFileSync(widgetPath, "utf-8");
+    res.setHeader("Content-Type", "application/javascript");
+    res.setHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
+    res.send(widgetCode);
+  } catch (error) {
+    console.error("Error serving widget:", error);
+    res.status(500).send("/* Widget file not found */");
+  }
+});
 
 // Routes
 app.use("/api/checkout", checkoutRoutes);
