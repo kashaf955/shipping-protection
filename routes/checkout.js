@@ -36,6 +36,15 @@ router.post("/:checkoutId/fee", async (req, res, next) => {
     }
 
     const feeResult = await addShippingInsuranceFee(checkoutId, subtotalValue);
+    
+    // If fee already exists, still return success
+    if (feeResult.alreadyExists) {
+      return res.json({
+        success: true,
+        data: { ...feeResult, message: "Fee already exists" },
+      });
+    }
+    
     res.json({
       success: true,
       data: feeResult,
@@ -50,6 +59,15 @@ router.delete("/:checkoutId/fee", async (req, res, next) => {
   try {
     const { checkoutId } = req.params;
     const removalResult = await removeShippingInsuranceFee(checkoutId);
+    
+    // If fee was not found, still return success (idempotent operation)
+    if (removalResult.reason === "not_found" || removalResult.reason === "no_fees") {
+      return res.json({
+        success: true,
+        data: { removed: false, reason: removalResult.reason, message: "Fee not found or already removed" },
+      });
+    }
+    
     res.json({
       success: true,
       data: removalResult,

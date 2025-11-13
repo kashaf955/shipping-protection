@@ -38,6 +38,27 @@ export async function getCheckout(checkoutId) {
 // Add shipping insurance fee
 export async function addShippingInsuranceFee(checkoutId, subtotal) {
   try {
+    // First check if fee already exists
+    const checkout = await getCheckout(checkoutId);
+    const fees =
+      checkout?.data?.fees ??
+      checkout?.data?.cart?.fees ??
+      checkout?.fees ??
+      [];
+
+    const existingFee = Array.isArray(fees)
+      ? fees.find(
+          (fee) =>
+            fee.name?.toLowerCase() === "shipping insurance" ||
+            fee.display_name?.toLowerCase() === "shipping insurance"
+        )
+      : null;
+
+    if (existingFee) {
+      console.log("ℹ️ Shipping insurance fee already exists");
+      return { alreadyExists: true, fee: existingFee };
+    }
+
     const amount = (subtotal * 0.04).toFixed(2);
     console.log(`Adding shipping insurance fee: $${amount}`);
 
@@ -50,35 +71,28 @@ export async function addShippingInsuranceFee(checkoutId, subtotal) {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify(
-          {
-            fees: [
-              {
-                type: "custom_fee",
-                name: "Shipping Insurance",
-                display_name: "Shipping Insurance",
-                cost: parseFloat(amount),
-                source: "AA",
-                // "tax_class_id": 1
-              },
-            ],
-          }
-          //   {
-          //   fees: [{
-          //     name: "Shipping Insurance",
-          //     display_name: "Shipping Insurance",
-          //     cost: parseFloat(amount),
-          //     type: "fixed",
-          //     source: "custom-app",
-          //   }]
-          // }
-        ),
+        body: JSON.stringify({
+          fees: [
+            {
+              type: "custom_fee",
+              name: "Shipping Insurance",
+              display_name: "Shipping Insurance",
+              cost: parseFloat(amount),
+              source: "AA",
+            },
+          ],
+        }),
       },
       15000 // 15 second timeout
     );
 
     if (!response.ok) {
-      const errorData = await response.json();
+      let errorData;
+      try {
+        errorData = await response.json();
+      } catch {
+        errorData = { message: await response.text() };
+      }
       throw new Error(
         `Failed to add fee: ${response.status} - ${JSON.stringify(errorData)}`
       );
@@ -96,40 +110,78 @@ export async function addShippingInsuranceFee(checkoutId, subtotal) {
 export async function removeShippingInsuranceFee(checkoutId) {
   try {
     const checkout = await getCheckout(checkoutId);
-    const fees = checkout?.data?.fees ?? [];
-    const feeToRemove = fees.find(
+    // Try multiple possible locations for fees
+    const fees =
+      checkout?.data?.fees ??
+      checkout?.data?.cart?.fees ??
+      checkout?.fees ??
+      [];
+
+    if (!Array.isArray(fees) || fees.length === 0) {
+      console.log("ℹ️ No fees found in checkout");
+      return { removed: false, reason: "no_fees" };
+    }
+
+    // Find all shipping insurance fees (in case there are multiple)
+    const feesToRemove = fees.filter(
       (fee) =>
-        fee.name?.toLowerCase() === "shipping insurance" ||
-        fee.display_name?.toLowerCase() === "shipping insurance"
+        (fee.name?.toLowerCase() === "shipping insurance" ||
+          fee.display_name?.toLowerCase() === "shipping insurance" ||
+          fee.title?.toLowerCase() === "shipping insurance") &&
+        fee.id // Only remove fees that have an ID
     );
 
-    if (!feeToRemove) {
+    if (feesToRemove.length === 0) {
       console.log("ℹ️ No shipping insurance fee found to remove");
       return { removed: false, reason: "not_found" };
     }
 
-    const response = await fetchWithTimeout(
-      `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${feeToRemove.id}`,
-      {
-        method: "DELETE",
-        headers: {
-          "X-Auth-Token": ACCESS_TOKEN,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-      },
-      15000
-    );
+    // Remove all matching fees (usually just one, but handle multiple)
+    const removalPromises = feesToRemove.map(async (fee) => {
+      try {
+        const response = await fetchWithTimeout(
+          `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${fee.id}`,
+          {
+            method: "DELETE",
+            headers: {
+              "X-Auth-Token": ACCESS_TOKEN,
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+          },
+          15000
+        );
 
-    if (!response.ok && response.status !== 204) {
-      const errorText = await response.text();
+        if (!response.ok && response.status !== 204) {
+          const errorText = await response.text();
+          console.error(
+            `Failed to remove fee ${fee.id}: ${response.status} - ${errorText}`
+          );
+          return { success: false, feeId: fee.id, error: errorText };
+        }
+
+        return { success: true, feeId: fee.id };
+      } catch (error) {
+        console.error(`Error removing fee ${fee.id}:`, error.message);
+        return { success: false, feeId: fee.id, error: error.message };
+      }
+    });
+
+    const results = await Promise.all(removalPromises);
+    const successful = results.filter((r) => r.success);
+
+    if (successful.length > 0) {
+      console.log(
+        `✅ Shipping insurance fee(s) removed successfully: ${successful.length} fee(s)`
+      );
+      return { removed: true, count: successful.length };
+    } else {
+      // If all removals failed, throw the first error
+      const firstError = results.find((r) => !r.success);
       throw new Error(
-        `Failed to remove fee: ${response.status} - ${errorText}`
+        `Failed to remove fee: ${firstError?.error || "Unknown error"}`
       );
     }
-
-    console.log("✅ Shipping insurance fee removed successfully");
-    return { removed: true };
   } catch (error) {
     console.error("❌ Error removing fee:", error.message);
     throw error;
