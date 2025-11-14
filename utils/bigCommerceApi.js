@@ -158,43 +158,55 @@ export async function removeShippingInsuranceFee(checkoutId) {
       return { removed: false, reason: "not_found" };
     }
 
-    // Try removing fees by updating checkout fees array (alternative method)
-    // This might work better if DELETE endpoint has issues
-    console.log("🔄 Attempting to remove fee by updating checkout...");
+    // BigCommerce DELETE endpoint returns 404 - likely doesn't exist
+    // Instead, we need to update the checkout with fees array minus shipping insurance
+    console.log("🔄 Removing fee by updating checkout fees array...");
+
+    // Filter out shipping insurance fees
+    const updatedFees = Array.isArray(fees)
+      ? fees.filter((f) => {
+          const isShippingInsurance =
+            f.name?.toLowerCase() === "shipping insurance" ||
+            f.display_name?.toLowerCase() === "shipping insurance" ||
+            f.title?.toLowerCase() === "shipping insurance";
+          return !isShippingInsurance;
+        })
+      : [];
+
+    console.log(
+      `📊 Updated fees array: ${updatedFees.length} fee(s) (removed ${
+        fees.length - updatedFees.length
+      } shipping insurance fee(s))`
+    );
+
+    // Prepare fees for update - only include required fields
+    const feesToUpdate = updatedFees.map((fee) => {
+      const feeObj = {
+        type: fee.type || "custom_fee",
+        name: fee.name,
+        display_name: fee.display_name || fee.name,
+        cost: fee.cost || fee.cost_inc_tax || fee.cost_ex_tax || 0,
+        source: fee.source || "AA",
+      };
+      
+      // Only include optional fields if they exist
+      if (fee.tax_class_id !== null && fee.tax_class_id !== undefined) {
+        feeObj.tax_class_id = fee.tax_class_id;
+      }
+      
+      return feeObj;
+    });
+
+    console.log(`📤 Fees to update:`, JSON.stringify(feesToUpdate, null, 2));
+
+    // Try PUT on checkout endpoint - update entire checkout with new fees array
+    const checkoutUpdateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}`;
+    
+    console.log(`📤 PUT request to update checkout: ${checkoutUpdateUrl}`);
 
     try {
-      // Get current checkout to get the full structure
-      const currentCheckout = checkout?.data || checkout;
-
-      // Filter out shipping insurance fees from the fees array
-      const updatedFees = Array.isArray(fees)
-        ? fees.filter((f) => {
-            const isShippingInsurance =
-              f.name?.toLowerCase() === "shipping insurance" ||
-              f.display_name?.toLowerCase() === "shipping insurance" ||
-              f.title?.toLowerCase() === "shipping insurance";
-            return !isShippingInsurance;
-          })
-        : [];
-
-      console.log(
-        `📊 Updating checkout: removing ${
-          fees.length - updatedFees.length
-        } shipping insurance fee(s), keeping ${updatedFees.length} other fee(s)`
-      );
-
-      // Try updating checkout with PUT to remove the fees
-      // BigCommerce might require updating via /checkouts/:id endpoint with full structure
-      const updateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
-
-      console.log(`📤 PUT request to: ${updateUrl}`);
-      console.log(
-        `📤 Request body (updated fees):`,
-        JSON.stringify({ fees: updatedFees }, null, 2)
-      );
-
-      const updateResponse = await fetchWithTimeout(
-        updateUrl,
+      const checkoutUpdateResponse = await fetchWithTimeout(
+        checkoutUpdateUrl,
         {
           method: "PUT",
           headers: {
@@ -203,76 +215,65 @@ export async function removeShippingInsuranceFee(checkoutId) {
             Accept: "application/json",
           },
           body: JSON.stringify({
-            fees: updatedFees,
+            fees: feesToUpdate,
           }),
         },
         15000
       );
 
-      console.log(`📡 PUT update response status: ${updateResponse.status}`);
+      console.log(`📡 Checkout PUT response status: ${checkoutUpdateResponse.status}`);
 
-      let updateResponseBody = null;
+      let checkoutUpdateBody = null;
       try {
-        const text = await updateResponse.text();
+        const text = await checkoutUpdateResponse.text();
         if (text) {
           try {
-            updateResponseBody = JSON.parse(text);
+            checkoutUpdateBody = JSON.parse(text);
           } catch {
-            updateResponseBody = text;
+            checkoutUpdateBody = text;
           }
         }
       } catch (error) {
-        console.error(`Error reading PUT response:`, error.message);
+        console.error(`Error reading checkout PUT response:`, error.message);
       }
 
-      if (updateResponseBody) {
-        console.log(`📡 PUT update response body:`, updateResponseBody);
+      if (checkoutUpdateBody) {
+        console.log(`📡 Checkout PUT response body:`, checkoutUpdateBody);
       }
 
-      if (updateResponse.ok) {
-        // Verify the fee is actually gone
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Wait for BigCommerce to process the update
+      await new Promise((resolve) => setTimeout(resolve, 2000));
 
-        const verifyCheckout = await getCheckout(checkoutId);
-        const verifyFees =
-          verifyCheckout?.data?.fees ??
-          verifyCheckout?.data?.cart?.fees ??
-          verifyCheckout?.fees ??
-          [];
+      // Verify the fee is actually gone
+      const verifyCheckout = await getCheckout(checkoutId);
+      const verifyFees =
+        verifyCheckout?.data?.fees ??
+        verifyCheckout?.data?.cart?.fees ??
+        verifyCheckout?.fees ??
+        [];
 
-        const feeStillExists =
-          Array.isArray(verifyFees) &&
-          verifyFees.some(
-            (f) =>
-              f.name?.toLowerCase() === "shipping insurance" ||
-              f.display_name?.toLowerCase() === "shipping insurance"
-          );
-
-        if (!feeStillExists) {
-          console.log(`✅ Fees removed successfully via PUT update method`);
-          return {
-            removed: true,
-            count: feesToRemove.length,
-            method: "PUT",
-          };
-        } else {
-          console.error(`❌ Fee still exists after PUT update`);
-        }
-      } else {
-        let updateError;
-        try {
-          updateError = await updateResponse.json();
-        } catch {
-          updateError = await updateResponse.text();
-        }
-        console.error(
-          `❌ PUT update failed: ${updateResponse.status} - ${JSON.stringify(
-            updateError
-          )}`
+      const feeStillExists =
+        Array.isArray(verifyFees) &&
+        verifyFees.some(
+          (f) =>
+            f.name?.toLowerCase() === "shipping insurance" ||
+            f.display_name?.toLowerCase() === "shipping insurance"
         );
+
+      if (!feeStillExists) {
+        console.log(`✅ Fees removed successfully via checkout PUT update`);
+        return {
+          removed: true,
+          count: feesToRemove.length,
+          method: "PUT_checkout",
+        };
+      } else {
+        console.error(`❌ Fee still exists after checkout PUT update - verification failed`);
+        // Fall through to DELETE method below
       }
     } catch (updateError) {
-      console.error(`❌ PUT update method failed:`, updateError.message);
+      console.error(`❌ Checkout PUT update method failed:`, updateError.message);
+      // Fall through to DELETE method below
     }
 
     // If PUT method didn't work, try DELETE method
