@@ -209,54 +209,77 @@ export async function removeShippingInsuranceFee(checkoutId) {
 
     console.log(`📤 Fees to update:`, JSON.stringify(feesToUpdate, null, 2));
 
-    // Method 1: Try POST to fees endpoint with filtered array (might replace all fees)
-    // BigCommerce might replace all fees when POSTing to /fees endpoint
-    const feesPostUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
+    // Method 1: Try PUT on individual fee endpoint to update cost to $0.00
+    // This should update the existing fee by ID
+    console.log("🔄 Method 1: Updating individual fee(s) via PUT to set cost to $0.00...");
     
-    console.log(`📤 POST request to replace fees: ${feesPostUrl}`);
-    console.log(`📤 POST body (all fees without insurance):`, JSON.stringify({ fees: feesToUpdate }, null, 2));
-
-    try {
-      const feesPostResponse = await fetchWithTimeout(
-        feesPostUrl,
-        {
-          method: "POST",
-          headers: {
-            "X-Auth-Token": ACCESS_TOKEN,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            fees: feesToUpdate,
-          }),
-        },
-        15000
-      );
-
-      console.log(`📡 Fees POST response status: ${feesPostResponse.status}`);
-
-      let feesPostBody = null;
+    const feeUpdatePromises = feesToRemove.map(async (fee) => {
       try {
-        const text = await feesPostResponse.text();
-        if (text) {
-          try {
-            feesPostBody = JSON.parse(text);
-          } catch {
-            feesPostBody = text;
+        const feeUpdateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${fee.id}`;
+        
+        console.log(`📤 PUT request to update fee ${fee.id} cost to $0.00: ${feeUpdateUrl}`);
+        
+        const feeUpdateResponse = await fetchWithTimeout(
+          feeUpdateUrl,
+          {
+            method: "PUT",
+            headers: {
+              "X-Auth-Token": ACCESS_TOKEN,
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({
+              type: fee.type || "custom_fee",
+              name: fee.name,
+              display_name: fee.display_name || fee.name,
+              cost: 0, // Set to $0.00
+              source: fee.source || "AA",
+              ...(fee.tax_class_id !== null && fee.tax_class_id !== undefined && { tax_class_id: fee.tax_class_id }),
+            }),
+          },
+          15000
+        );
+
+        console.log(`📡 Fee PUT response status: ${feeUpdateResponse.status} for fee ${fee.id}`);
+
+        let feeUpdateBody = null;
+        try {
+          const text = await feeUpdateResponse.text();
+          if (text) {
+            try {
+              feeUpdateBody = JSON.parse(text);
+            } catch {
+              feeUpdateBody = text;
+            }
           }
+        } catch (error) {
+          console.error(`Error reading fee PUT response:`, error.message);
         }
+
+        if (feeUpdateBody) {
+          console.log(`📡 Fee PUT response body:`, feeUpdateBody);
+        }
+
+        if (!feeUpdateResponse.ok) {
+          console.error(`❌ Fee PUT failed with status ${feeUpdateResponse.status} for fee ${fee.id}`);
+          return { success: false, feeId: fee.id, error: feeUpdateBody };
+        }
+
+        return { success: true, feeId: fee.id };
       } catch (error) {
-        console.error(`Error reading fees POST response:`, error.message);
+        console.error(`❌ Error updating fee ${fee.id}:`, error.message);
+        return { success: false, feeId: fee.id, error: error.message };
       }
+    });
 
-      if (feesPostBody) {
-        console.log(`📡 Fees POST response body:`, feesPostBody);
-      }
+    const feeUpdateResults = await Promise.all(feeUpdatePromises);
+    const successfulUpdates = feeUpdateResults.filter((r) => r.success);
 
+    if (successfulUpdates.length > 0) {
       // Wait for BigCommerce to process
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      // Verify the fee is actually removed (either gone or cost is $0)
+      // Verify the fee is actually removed (cost is $0)
       const verifyCheckout = await getCheckout(checkoutId);
       const verifyFees =
         verifyCheckout?.data?.fees ??
@@ -281,26 +304,31 @@ export async function removeShippingInsuranceFee(checkoutId) {
             shippingInsuranceFee.cost_inc_tax === undefined));
 
       if (feeRemoved) {
-        console.log(`✅ Fees removed successfully via fees POST method (cost set to $0.00)`);
+        console.log(`✅ Fees removed successfully via individual fee PUT (cost set to $0.00)`);
         return {
           removed: true,
-          count: feesToRemove.length,
-          method: "POST_fees_zero_cost",
+          count: successfulUpdates.length,
+          method: "PUT_fee_by_id",
         };
       } else {
-        console.error(`❌ Fee still has cost after fees POST - verification failed`);
+        console.error(`❌ Fee still has cost after individual fee PUT - verification failed`);
         console.log(`Shipping insurance fee:`, shippingInsuranceFee);
       }
-    } catch (postError) {
-      console.error(`❌ Fees POST method failed:`, postError.message);
+    } else {
+      console.error(`❌ All individual fee PUT updates failed`);
+      console.log(`Fee update results:`, feeUpdateResults);
     }
 
     // Method 2: Try PUT on checkout endpoint - update entire checkout with new fees array
+    // BigCommerce requires customer_message or staff_note field for PUT requests
     const checkoutUpdateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}`;
     
     console.log(`📤 PUT request to update checkout: ${checkoutUpdateUrl}`);
 
     try {
+      // Get current checkout to preserve other fields
+      const currentCheckout = checkout?.data || checkout;
+      
       const checkoutUpdateResponse = await fetchWithTimeout(
         checkoutUpdateUrl,
         {
@@ -312,6 +340,9 @@ export async function removeShippingInsuranceFee(checkoutId) {
           },
           body: JSON.stringify({
             fees: feesToUpdate,
+            // BigCommerce requires customer_message or staff_note for PUT requests
+            customer_message: currentCheckout?.customer_message || "",
+            staff_note: currentCheckout?.staff_note || "",
           }),
         },
         15000
