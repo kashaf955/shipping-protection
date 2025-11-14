@@ -199,7 +199,85 @@ export async function removeShippingInsuranceFee(checkoutId) {
 
     console.log(`📤 Fees to update:`, JSON.stringify(feesToUpdate, null, 2));
 
-    // Try PUT on checkout endpoint - update entire checkout with new fees array
+    // Method 1: Try POST to fees endpoint with filtered array (might replace all fees)
+    // BigCommerce might replace all fees when POSTing to /fees endpoint
+    const feesPostUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
+    
+    console.log(`📤 POST request to replace fees: ${feesPostUrl}`);
+    console.log(`📤 POST body (all fees without insurance):`, JSON.stringify({ fees: feesToUpdate }, null, 2));
+
+    try {
+      const feesPostResponse = await fetchWithTimeout(
+        feesPostUrl,
+        {
+          method: "POST",
+          headers: {
+            "X-Auth-Token": ACCESS_TOKEN,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            fees: feesToUpdate,
+          }),
+        },
+        15000
+      );
+
+      console.log(`📡 Fees POST response status: ${feesPostResponse.status}`);
+
+      let feesPostBody = null;
+      try {
+        const text = await feesPostResponse.text();
+        if (text) {
+          try {
+            feesPostBody = JSON.parse(text);
+          } catch {
+            feesPostBody = text;
+          }
+        }
+      } catch (error) {
+        console.error(`Error reading fees POST response:`, error.message);
+      }
+
+      if (feesPostBody) {
+        console.log(`📡 Fees POST response body:`, feesPostBody);
+      }
+
+      // Wait for BigCommerce to process
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Verify the fee is actually gone
+      const verifyCheckout = await getCheckout(checkoutId);
+      const verifyFees =
+        verifyCheckout?.data?.fees ??
+        verifyCheckout?.data?.cart?.fees ??
+        verifyCheckout?.fees ??
+        [];
+
+      const feeStillExists =
+        Array.isArray(verifyFees) &&
+        verifyFees.some(
+          (f) =>
+            f.name?.toLowerCase() === "shipping insurance" ||
+            f.display_name?.toLowerCase() === "shipping insurance"
+        );
+
+      if (!feeStillExists) {
+        console.log(`✅ Fees removed successfully via fees POST method`);
+        return {
+          removed: true,
+          count: feesToRemove.length,
+          method: "POST_fees",
+        };
+      } else {
+        console.error(`❌ Fee still exists after fees POST - verification failed`);
+        console.log(`Current fees after POST:`, verifyFees);
+      }
+    } catch (postError) {
+      console.error(`❌ Fees POST method failed:`, postError.message);
+    }
+
+    // Method 2: Try PUT on checkout endpoint - update entire checkout with new fees array
     const checkoutUpdateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}`;
     
     console.log(`📤 PUT request to update checkout: ${checkoutUpdateUrl}`);
@@ -241,35 +319,41 @@ export async function removeShippingInsuranceFee(checkoutId) {
         console.log(`📡 Checkout PUT response body:`, checkoutUpdateBody);
       }
 
-      // Wait for BigCommerce to process the update
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      // Verify the fee is actually gone
-      const verifyCheckout = await getCheckout(checkoutId);
-      const verifyFees =
-        verifyCheckout?.data?.fees ??
-        verifyCheckout?.data?.cart?.fees ??
-        verifyCheckout?.fees ??
-        [];
-
-      const feeStillExists =
-        Array.isArray(verifyFees) &&
-        verifyFees.some(
-          (f) =>
-            f.name?.toLowerCase() === "shipping insurance" ||
-            f.display_name?.toLowerCase() === "shipping insurance"
-        );
-
-      if (!feeStillExists) {
-        console.log(`✅ Fees removed successfully via checkout PUT update`);
-        return {
-          removed: true,
-          count: feesToRemove.length,
-          method: "PUT_checkout",
-        };
+      if (!checkoutUpdateResponse.ok) {
+        console.error(`❌ Checkout PUT failed with status ${checkoutUpdateResponse.status}`);
+        console.error(`Error response:`, checkoutUpdateBody);
+        // Don't verify if PUT failed - fall through to DELETE
       } else {
-        console.error(`❌ Fee still exists after checkout PUT update - verification failed`);
-        // Fall through to DELETE method below
+        // Wait for BigCommerce to process the update
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // Verify the fee is actually gone
+        const verifyCheckout = await getCheckout(checkoutId);
+        const verifyFees =
+          verifyCheckout?.data?.fees ??
+          verifyCheckout?.data?.cart?.fees ??
+          verifyCheckout?.fees ??
+          [];
+
+        const feeStillExists =
+          Array.isArray(verifyFees) &&
+          verifyFees.some(
+            (f) =>
+              f.name?.toLowerCase() === "shipping insurance" ||
+              f.display_name?.toLowerCase() === "shipping insurance"
+          );
+
+        if (!feeStillExists) {
+          console.log(`✅ Fees removed successfully via checkout PUT update`);
+          return {
+            removed: true,
+            count: feesToRemove.length,
+            method: "PUT_checkout",
+          };
+        } else {
+          console.error(`❌ Fee still exists after checkout PUT update - verification failed`);
+          console.log(`Current fees after PUT:`, verifyFees);
+        }
       }
     } catch (updateError) {
       console.error(`❌ Checkout PUT update method failed:`, updateError.message);
