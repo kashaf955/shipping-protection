@@ -1,8 +1,7 @@
 import express from "express";
 import {
   getCheckout,
-  addShippingInsuranceFee,
-  removeShippingInsuranceFee,
+  toggleShippingInsuranceFee,
 } from "../utils/bigCommerceApi.js";
 
 const router = express.Router();
@@ -21,112 +20,73 @@ router.get("/:checkoutId", async (req, res, next) => {
   }
 });
 
-// Add shipping insurance fee
-router.post("/:checkoutId/fee", async (req, res, next) => {
+// Toggle shipping insurance fee (add or remove based on enabled flag)
+router.put("/:checkoutId/fee", async (req, res, next) => {
   try {
     const { checkoutId } = req.params;
-    const { subtotal } = req.body;
-    const subtotalValue = Number(subtotal);
+    const { enabled, subtotal } = req.body;
 
-    if (!Number.isFinite(subtotalValue)) {
+    // Validate enabled flag
+    if (typeof enabled !== "boolean") {
       return res.status(400).json({
         success: false,
-        error: "A numeric subtotal is required",
+        error:
+          "The 'enabled' field is required and must be a boolean (true/false)",
       });
     }
 
-    const feeResult = await addShippingInsuranceFee(checkoutId, subtotalValue);
-    
-    // If fee already exists, still return success
-    if (feeResult.alreadyExists) {
-      return res.json({
-        success: true,
-        data: { ...feeResult, message: "Fee already exists" },
-      });
+    // If enabling, subtotal is required
+    if (enabled) {
+      const subtotalValue = Number(subtotal);
+      if (!Number.isFinite(subtotalValue) || subtotalValue <= 0) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "A valid numeric subtotal greater than 0 is required when enabling insurance",
+        });
+      }
     }
-    
+
+    const result = await toggleShippingInsuranceFee(
+      checkoutId,
+      enabled,
+      enabled ? Number(subtotal) : null
+    );
+
     res.json({
       success: true,
-      data: feeResult,
+      data: result,
     });
   } catch (error) {
     next(error);
   }
 });
 
-// Remove shipping insurance fee
-router.delete("/:checkoutId/fee", async (req, res, next) => {
-  try {
-    const { checkoutId } = req.params;
-    const removalResult = await removeShippingInsuranceFee(checkoutId);
-    
-    // Success cases: fee was removed, or fee not found (already removed)
-    if (removalResult.removed) {
-      return res.json({
-        success: true,
-        data: removalResult,
-      });
-    }
-    
-    // Idempotent success: fee not found or no fees (already removed)
-    if (removalResult.reason === "not_found" || removalResult.reason === "no_fees") {
-      return res.json({
-        success: true,
-        data: { 
-          removed: false, 
-          reason: removalResult.reason,
-          message: "Fee not found or already removed"
-        },
-      });
-    }
-    
-    // Actual failure: removal failed
-    if (removalResult.reason === "removal_failed") {
-      return res.status(500).json({
-        success: false,
-        error: removalResult.error || "Failed to remove fee from BigCommerce",
-        data: removalResult
-      });
-    }
-    
-    // Default: treat as success (idempotent)
-    res.json({
-      success: true,
-      data: removalResult,
-    });
-  } catch (error) {
-    // Unexpected errors return error status
-    console.error("Unexpected error in fee removal:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message || "Failed to remove fee",
-      data: {
-        removed: false,
-        reason: "error",
-        error: error.message
-      }
-    });
-  }
-});
-
-// Test endpoint (combines get checkout and add fee)
+// Test endpoint (combines get checkout and toggle fee)
 router.post("/test", async (req, res, next) => {
   try {
     const checkoutId =
       req.body.checkoutId || "52537871-c507-4f11-a6bc-87da398d2c34";
-    // const subtotal = 100;
+    const enabled = req.body.enabled !== undefined ? req.body.enabled : true;
 
     console.log("🚀 Starting BigCommerce API test...");
 
     // First, try to get the checkout
     const checkoutData = await getCheckout(checkoutId);
 
-    const subtotal = checkoutData.data.cart.base_amount;
+    const subtotal =
+      checkoutData.data?.cart?.base_amount ||
+      checkoutData.data?.cart?.cart_amount ||
+      100;
     console.log("Checkout retrieved:", checkoutData);
 
-    // Then try to add the fee
-    const feeResult = await addShippingInsuranceFee(checkoutId, subtotal);
-    console.log("Fee added:", feeResult);
+    // Then try to toggle the fee
+    const feeResult = await toggleShippingInsuranceFee(
+      checkoutId,
+      enabled,
+      enabled ? subtotal : null
+    );
+    console.log("Fee toggled:", feeResult);
 
     res.json({
       success: true,
