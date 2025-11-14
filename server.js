@@ -21,8 +21,14 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 app.use(
   cors({
     origin: allowedOrigins && allowedOrigins.length > 0 ? allowedOrigins : "*",
-    methods: ["GET", "POST", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Auth-Token",
+      "X-Requested-With",
+    ],
+    credentials: false,
   })
 );
 app.use(express.json());
@@ -60,7 +66,7 @@ app.get("/", (req, res) => {
     endpoints: {
       health: "/health",
       getCheckout: "GET /api/checkout/:checkoutId",
-      addInsuranceFee: "POST /api/checkout/:checkoutId/fee",
+      toggleInsuranceFee: "PUT /api/checkout/:checkoutId/fee",
       test: "POST /api/checkout/test",
     },
   });
