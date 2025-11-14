@@ -181,7 +181,7 @@ export async function toggleShippingInsuranceFee(
         };
       }
     } else {
-      // DISABLE: Set fee cost to $0.00
+      // DISABLE: Remove the fee using DELETE or POST to replace fees array
       if (!existingFee) {
         console.log("ℹ️ Shipping insurance fee not found - already disabled");
         return {
@@ -191,59 +191,136 @@ export async function toggleShippingInsuranceFee(
         };
       }
 
-      console.log(`💰 Setting shipping insurance fee to $0.00 (disabling)`);
+      console.log(`🗑️ Removing shipping insurance fee (fee ID: ${existingFee.id})`);
 
-      const updateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${existingFee.id}`;
+      // Strategy 1: Try DELETE first (proper REST method)
+      const deleteUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${existingFee.id}`;
+      
+      console.log(`📤 DELETE request to remove fee ${existingFee.id}: ${deleteUrl}`);
 
-      console.log(
-        `📤 PUT request to update fee ${existingFee.id} cost to $0.00: ${updateUrl}`
+      try {
+        const deleteResponse = await fetchWithTimeout(
+          deleteUrl,
+          {
+            method: "DELETE",
+            headers: {
+              "X-Auth-Token": ACCESS_TOKEN,
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+          },
+          15000
+        );
+
+        // DELETE returns 204 No Content on success, 404 if already removed
+        if (deleteResponse.ok || deleteResponse.status === 204 || deleteResponse.status === 404) {
+          console.log("✅ Shipping insurance fee deleted successfully via DELETE");
+          
+          // Verify deletion by fetching checkout again
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const verifyCheckout = await getCheckout(checkoutId);
+          const verifyFees = verifyCheckout?.data?.fees ?? verifyCheckout?.data?.cart?.fees ?? verifyCheckout?.fees ?? [];
+          const stillExists = verifyFees.some(
+            fee => fee.id === existingFee.id &&
+            (fee.name?.toLowerCase() === "shipping insurance" ||
+             fee.display_name?.toLowerCase() === "shipping insurance") &&
+            fee.cost > 0
+          );
+
+          if (!stillExists) {
+            return {
+              enabled: false,
+              action: "deleted",
+              amount: 0,
+              message: "Fee successfully removed",
+            };
+          } else {
+            console.log("⚠️ DELETE succeeded but fee still exists, trying POST method...");
+            // Fall through to POST method
+          }
+        } else {
+          console.log(`⚠️ DELETE returned ${deleteResponse.status}, trying POST method...`);
+          // Fall through to POST method
+        }
+      } catch (deleteError) {
+        console.log(`⚠️ DELETE failed: ${deleteError.message}, trying POST method...`);
+        // Fall through to POST method
+      }
+
+      // Strategy 2: Use POST to replace entire fees array without shipping insurance fee
+      console.log(`📤 POST request to replace fees array (excluding shipping insurance)`);
+      
+      const allFees = Array.isArray(fees) ? fees : [];
+      const feesWithoutInsurance = allFees.filter(
+        (fee) =>
+          !(
+            fee.id === existingFee.id ||
+            (fee.name?.toLowerCase() === "shipping insurance" ||
+              fee.display_name?.toLowerCase() === "shipping insurance")
+          )
       );
 
-      const response = await fetchWithTimeout(
-        updateUrl,
+      const postUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
+      
+      const postResponse = await fetchWithTimeout(
+        postUrl,
         {
-          method: "PUT",
+          method: "POST",
           headers: {
             "X-Auth-Token": ACCESS_TOKEN,
             "Content-Type": "application/json",
             Accept: "application/json",
           },
           body: JSON.stringify({
-            type: existingFee.type || "custom_fee",
-            name: existingFee.name || "Shipping Insurance",
-            display_name: existingFee.display_name || "Shipping Insurance",
-            cost: 0, // Set to $0.00
-            source: existingFee.source || "AA",
-            ...(existingFee.tax_class_id !== null &&
-              existingFee.tax_class_id !== undefined && {
-                tax_class_id: existingFee.tax_class_id,
+            fees: feesWithoutInsurance.map((fee) => ({
+              type: fee.type,
+              name: fee.name,
+              display_name: fee.display_name,
+              cost: fee.cost,
+              source: fee.source,
+              ...(fee.tax_class_id !== null && fee.tax_class_id !== undefined && {
+                tax_class_id: fee.tax_class_id,
               }),
+            })),
           }),
         },
         15000
       );
 
-      if (!response.ok) {
+      if (!postResponse.ok) {
         let errorData;
         try {
-          errorData = await response.json();
+          errorData = await postResponse.json();
         } catch {
-          errorData = { message: await response.text() };
+          errorData = { message: await postResponse.text() };
         }
         throw new Error(
-          `Failed to disable fee: ${response.status} - ${JSON.stringify(
+          `Failed to remove fee via POST: ${postResponse.status} - ${JSON.stringify(
             errorData
           )}`
         );
       }
 
-      const data = await response.json();
-      console.log(
-        "✅ Shipping insurance fee disabled successfully (cost set to $0.00)"
+      // Verify removal
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const verifyCheckout = await getCheckout(checkoutId);
+      const verifyFees = verifyCheckout?.data?.fees ?? verifyCheckout?.data?.cart?.fees ?? verifyCheckout?.fees ?? [];
+      const stillExists = verifyFees.some(
+        fee => fee.id === existingFee.id &&
+        (fee.name?.toLowerCase() === "shipping insurance" ||
+         fee.display_name?.toLowerCase() === "shipping insurance") &&
+        fee.cost > 0
       );
+
+      if (stillExists) {
+        throw new Error("Fee still exists after POST request - removal failed");
+      }
+
+      const data = await postResponse.json();
+      console.log("✅ Shipping insurance fee removed successfully via POST");
       return {
         enabled: false,
-        action: "disabled",
+        action: "removed",
         amount: 0,
         fee: data,
       };
