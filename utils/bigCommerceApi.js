@@ -158,44 +158,54 @@ export async function removeShippingInsuranceFee(checkoutId) {
       return { removed: false, reason: "not_found" };
     }
 
-    // BigCommerce DELETE endpoint returns 404 - likely doesn't exist
-    // Instead, we need to update the checkout with fees array minus shipping insurance
-    console.log("🔄 Removing fee by updating checkout fees array...");
+    // BigCommerce DELETE endpoint returns 404 - likely doesn't support deleting fees
+    // Workaround: Set the shipping insurance fee cost to $0.00 instead of removing it
+    // This effectively removes it from the total while keeping the fee object
+    console.log("🔄 Removing fee by setting cost to $0.00...");
 
-    // Filter out shipping insurance fees
-    const updatedFees = Array.isArray(fees)
-      ? fees.filter((f) => {
+    // Prepare fees array with shipping insurance fee set to $0.00
+    const feesToUpdate = Array.isArray(fees)
+      ? fees.map((fee) => {
           const isShippingInsurance =
-            f.name?.toLowerCase() === "shipping insurance" ||
-            f.display_name?.toLowerCase() === "shipping insurance" ||
-            f.title?.toLowerCase() === "shipping insurance";
-          return !isShippingInsurance;
+            fee.name?.toLowerCase() === "shipping insurance" ||
+            fee.display_name?.toLowerCase() === "shipping insurance" ||
+            fee.title?.toLowerCase() === "shipping insurance";
+          
+          if (isShippingInsurance) {
+            // Set shipping insurance fee to $0.00
+            console.log(`💰 Setting shipping insurance fee to $0.00 instead of removing`);
+            return {
+              type: fee.type || "custom_fee",
+              name: fee.name,
+              display_name: fee.display_name || fee.name,
+              cost: 0, // Set to $0.00
+              source: fee.source || "AA",
+              ...(fee.tax_class_id !== null && fee.tax_class_id !== undefined && { tax_class_id: fee.tax_class_id }),
+            };
+          } else {
+            // Keep other fees as-is
+            return {
+              type: fee.type || "custom_fee",
+              name: fee.name,
+              display_name: fee.display_name || fee.name,
+              cost: fee.cost || fee.cost_inc_tax || fee.cost_ex_tax || 0,
+              source: fee.source || "AA",
+              ...(fee.tax_class_id !== null && fee.tax_class_id !== undefined && { tax_class_id: fee.tax_class_id }),
+            };
+          }
         })
       : [];
 
-    console.log(
-      `📊 Updated fees array: ${updatedFees.length} fee(s) (removed ${
-        fees.length - updatedFees.length
-      } shipping insurance fee(s))`
-    );
+    const shippingInsuranceFeesCount = Array.isArray(fees)
+      ? fees.filter((f) => {
+          const name = (f.name || f.display_name || f.title || "").toLowerCase();
+          return name === "shipping insurance";
+        }).length
+      : 0;
 
-    // Prepare fees for update - only include required fields
-    const feesToUpdate = updatedFees.map((fee) => {
-      const feeObj = {
-        type: fee.type || "custom_fee",
-        name: fee.name,
-        display_name: fee.display_name || fee.name,
-        cost: fee.cost || fee.cost_inc_tax || fee.cost_ex_tax || 0,
-        source: fee.source || "AA",
-      };
-      
-      // Only include optional fields if they exist
-      if (fee.tax_class_id !== null && fee.tax_class_id !== undefined) {
-        feeObj.tax_class_id = fee.tax_class_id;
-      }
-      
-      return feeObj;
-    });
+    console.log(
+      `📊 Updated fees array: ${feesToUpdate.length} fee(s) (setting ${shippingInsuranceFeesCount} shipping insurance fee(s) to $0.00)`
+    );
 
     console.log(`📤 Fees to update:`, JSON.stringify(feesToUpdate, null, 2));
 
@@ -246,7 +256,7 @@ export async function removeShippingInsuranceFee(checkoutId) {
       // Wait for BigCommerce to process
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      // Verify the fee is actually gone
+      // Verify the fee is actually removed (either gone or cost is $0)
       const verifyCheckout = await getCheckout(checkoutId);
       const verifyFees =
         verifyCheckout?.data?.fees ??
@@ -254,24 +264,32 @@ export async function removeShippingInsuranceFee(checkoutId) {
         verifyCheckout?.fees ??
         [];
 
-      const feeStillExists =
-        Array.isArray(verifyFees) &&
-        verifyFees.some(
-          (f) =>
-            f.name?.toLowerCase() === "shipping insurance" ||
-            f.display_name?.toLowerCase() === "shipping insurance"
-        );
+      const shippingInsuranceFee = Array.isArray(verifyFees)
+        ? verifyFees.find(
+            (f) =>
+              f.name?.toLowerCase() === "shipping insurance" ||
+              f.display_name?.toLowerCase() === "shipping insurance"
+          )
+        : null;
 
-      if (!feeStillExists) {
-        console.log(`✅ Fees removed successfully via fees POST method`);
+      // Fee is "removed" if it doesn't exist OR if its cost is $0.00
+      const feeRemoved =
+        !shippingInsuranceFee ||
+        (shippingInsuranceFee.cost === 0 &&
+          (shippingInsuranceFee.cost_inc_tax === 0 ||
+            shippingInsuranceFee.cost_inc_tax === null ||
+            shippingInsuranceFee.cost_inc_tax === undefined));
+
+      if (feeRemoved) {
+        console.log(`✅ Fees removed successfully via fees POST method (cost set to $0.00)`);
         return {
           removed: true,
           count: feesToRemove.length,
-          method: "POST_fees",
+          method: "POST_fees_zero_cost",
         };
       } else {
-        console.error(`❌ Fee still exists after fees POST - verification failed`);
-        console.log(`Current fees after POST:`, verifyFees);
+        console.error(`❌ Fee still has cost after fees POST - verification failed`);
+        console.log(`Shipping insurance fee:`, shippingInsuranceFee);
       }
     } catch (postError) {
       console.error(`❌ Fees POST method failed:`, postError.message);
@@ -335,24 +353,32 @@ export async function removeShippingInsuranceFee(checkoutId) {
           verifyCheckout?.fees ??
           [];
 
-        const feeStillExists =
-          Array.isArray(verifyFees) &&
-          verifyFees.some(
-            (f) =>
-              f.name?.toLowerCase() === "shipping insurance" ||
-              f.display_name?.toLowerCase() === "shipping insurance"
-          );
+        const shippingInsuranceFee = Array.isArray(verifyFees)
+          ? verifyFees.find(
+              (f) =>
+                f.name?.toLowerCase() === "shipping insurance" ||
+                f.display_name?.toLowerCase() === "shipping insurance"
+            )
+          : null;
 
-        if (!feeStillExists) {
-          console.log(`✅ Fees removed successfully via checkout PUT update`);
+        // Fee is "removed" if it doesn't exist OR if its cost is $0.00
+        const feeRemoved =
+          !shippingInsuranceFee ||
+          (shippingInsuranceFee.cost === 0 &&
+            (shippingInsuranceFee.cost_inc_tax === 0 ||
+              shippingInsuranceFee.cost_inc_tax === null ||
+              shippingInsuranceFee.cost_inc_tax === undefined));
+
+        if (feeRemoved) {
+          console.log(`✅ Fees removed successfully via checkout PUT update (cost set to $0.00)`);
           return {
             removed: true,
             count: feesToRemove.length,
-            method: "PUT_checkout",
+            method: "PUT_checkout_zero_cost",
           };
         } else {
-          console.error(`❌ Fee still exists after checkout PUT update - verification failed`);
-          console.log(`Current fees after PUT:`, verifyFees);
+          console.error(`❌ Fee still has cost after checkout PUT update - verification failed`);
+          console.log(`Shipping insurance fee:`, shippingInsuranceFee);
         }
       }
     } catch (updateError) {
