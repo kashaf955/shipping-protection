@@ -290,10 +290,6 @@ export async function toggleShippingInsuranceFee(
       }
 
       // Strategy 2: Use POST to replace entire fees array without shipping insurance fee
-      console.log(
-        `📤 POST request to replace fees array (excluding shipping insurance)`
-      );
-
       // Get fresh checkout data to ensure we have all current fees
       const freshCheckout = await getCheckout(checkoutId);
       const allFees =
@@ -340,184 +336,211 @@ export async function toggleShippingInsuranceFee(
         }))
       );
 
-      const postUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
-
-      // Build fees payload - include all required fields
-      const feesPayload = feesWithoutInsurance.map((fee) => {
-        const feeData = {
-          type: fee.type || "custom_fee",
-          name: fee.name,
-          display_name: fee.display_name || fee.name,
-          cost: fee.cost || fee.cost_inc_tax || fee.cost_ex_tax || 0,
-          source: fee.source || "AA",
-        };
-
-        // Include tax_class_id if present
-        if (fee.tax_class_id !== null && fee.tax_class_id !== undefined) {
-          feeData.tax_class_id = fee.tax_class_id;
-        }
-
-        return feeData;
-      });
-
-      console.log(
-        `📤 POST payload:`,
-        JSON.stringify({ fees: feesPayload }, null, 2)
-      );
-
-      const postResponse = await fetchWithTimeout(
-        postUrl,
-        {
-          method: "POST",
-          headers: {
-            "X-Auth-Token": ACCESS_TOKEN,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            fees: feesPayload,
-          }),
-        },
-        15000
-      );
-
-      console.log(`📥 POST response status: ${postResponse.status}`);
-
-      if (!postResponse.ok) {
-        let errorData;
-        try {
-          errorData = await postResponse.json();
-        } catch {
-          errorData = { message: await postResponse.text() };
-        }
-        console.error(`❌ POST failed:`, errorData);
-        throw new Error(
-          `Failed to remove fee via POST: ${
-            postResponse.status
-          } - ${JSON.stringify(errorData)}`
-        );
-      }
-
-      const postData = await postResponse.json();
-      console.log(`📥 POST response data:`, postData);
-
-      // Verify removal - wait longer for BigCommerce to process
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      const verifyCheckout = await getCheckout(checkoutId);
-      const verifyFees =
-        verifyCheckout?.data?.fees ??
-        verifyCheckout?.data?.cart?.fees ??
-        verifyCheckout?.fees ??
-        [];
-
-      console.log(
-        `🔍 Verification - checking ${verifyFees.length} fees:`,
-        verifyFees.map((f) => ({
-          id: f.id,
-          name: f.name,
-          cost: f.cost,
-          cost_inc_tax: f.cost_inc_tax,
-        }))
-      );
-
-      // Check if fee still exists (check all cost fields)
-      const stillExists = verifyFees.some((fee) => {
-        const isShippingInsurance =
-          fee.id === existingFee.id ||
-          fee.name?.toLowerCase() === "shipping insurance" ||
-          fee.display_name?.toLowerCase() === "shipping insurance";
-
-        if (!isShippingInsurance) return false;
-
-        // Check all possible cost fields
-        const cost = fee?.cost || 0;
-        const costIncTax = fee?.cost_inc_tax || 0;
-        const costExTax = fee?.cost_ex_tax || 0;
-        const hasNonZeroCost = cost > 0 || costIncTax > 0 || costExTax > 0;
-
-        if (hasNonZeroCost) {
-          console.log(`⚠️ Fee still exists with non-zero cost:`, {
-            id: fee.id,
-            cost,
-            cost_inc_tax: costIncTax,
-            cost_ex_tax: costExTax,
-          });
-        }
-
-        return hasNonZeroCost;
-      });
-
-      if (stillExists) {
+      // If no fees left, BigCommerce doesn't accept empty array - skip to Strategy 3
+      if (feesWithoutInsurance.length === 0) {
         console.log(
-          "⚠️ POST succeeded but fee still exists - trying cost=$0.01 workaround..."
+          "⚠️ No fees left after filtering - BigCommerce doesn't accept empty fees array. Skipping POST and trying cost=$0.01 workaround..."
+        );
+        // Fall through to Strategy 3
+      } else {
+        // Try POST to replace fees array (only if there are other fees)
+        console.log(
+          `📤 POST request to replace fees array (excluding shipping insurance)`
         );
 
-        // Strategy 3: If POST doesn't remove the fee, set cost to $0.01 (minimum amount)
-        // This effectively "removes" it from the total while keeping the fee object
+        const postUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
+
+        // Build fees payload - DO NOT include 'id' field (BigCommerce creates new IDs)
+        // Only include fields that are allowed when creating fees
+        const feesPayload = feesWithoutInsurance.map((fee) => {
+          // Extract base cost (prefer cost_inc_tax if cost is missing)
+          const baseCost = fee.cost ?? fee.cost_inc_tax ?? fee.cost_ex_tax ?? 0;
+
+          const feeData = {
+            type: fee.type || "custom_fee",
+            name: fee.name || "",
+            display_name: fee.display_name || fee.name || "",
+            cost: baseCost,
+            source: fee.source || "AA",
+          };
+
+          // Include tax_class_id if present (only if not null/undefined)
+          if (
+            fee.tax_class_id !== null &&
+            fee.tax_class_id !== undefined &&
+            fee.tax_class_id !== ""
+          ) {
+            feeData.tax_class_id = fee.tax_class_id;
+          }
+
+          return feeData;
+        });
+
+        console.log(
+          `📤 POST payload:`,
+          JSON.stringify({ fees: feesPayload }, null, 2)
+        );
+
         try {
-          const updateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${existingFee.id}`;
-
-          console.log(`📤 PUT request to set fee cost to $0.01: ${updateUrl}`);
-
-          const updateResponse = await fetchWithTimeout(
-            updateUrl,
+          const postResponse = await fetchWithTimeout(
+            postUrl,
             {
-              method: "PUT",
+              method: "POST",
               headers: {
                 "X-Auth-Token": ACCESS_TOKEN,
                 "Content-Type": "application/json",
                 Accept: "application/json",
               },
               body: JSON.stringify({
-                type: existingFee.type || "custom_fee",
-                name: existingFee.name || "Shipping Insurance",
-                display_name: existingFee.display_name || "Shipping Insurance",
-                cost: 0.01, // Set to minimum amount ($0.01) as workaround
-                source: existingFee.source || "AA",
-                ...(existingFee.tax_class_id !== null &&
-                  existingFee.tax_class_id !== undefined && {
-                    tax_class_id: existingFee.tax_class_id,
-                  }),
+                fees: feesPayload,
               }),
             },
             15000
           );
 
-          if (updateResponse.ok) {
+          console.log(`📥 POST response status: ${postResponse.status}`);
+
+          if (!postResponse.ok) {
+            let errorData;
+            try {
+              errorData = await postResponse.json();
+            } catch {
+              errorData = { message: await postResponse.text() };
+            }
+            console.error(`❌ POST failed:`, errorData);
             console.log(
-              "✅ Fee cost set to $0.01 as workaround (effectively removed)"
+              "⚠️ POST failed - skipping to cost=$0.01 workaround..."
             );
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-            return {
-              enabled: false,
-              action: "minimized",
-              amount: 0.01,
-              message: "Fee minimized to $0.01 (removal not supported)",
-            };
+            // Fall through to Strategy 3
           } else {
-            const errorText = await updateResponse.text();
-            console.error(
-              `❌ PUT to minimize fee failed: ${updateResponse.status} - ${errorText}`
+            const postData = await postResponse.json();
+            console.log(`📥 POST response data:`, postData);
+
+            // Verify removal - wait longer for BigCommerce to process
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            const verifyCheckout = await getCheckout(checkoutId);
+            const verifyFees =
+              verifyCheckout?.data?.fees ??
+              verifyCheckout?.data?.cart?.fees ??
+              verifyCheckout?.fees ??
+              [];
+
+            console.log(
+              `🔍 Verification - checking ${verifyFees.length} fees:`,
+              verifyFees.map((f) => ({
+                id: f.id,
+                name: f.name,
+                cost: f.cost,
+                cost_inc_tax: f.cost_inc_tax,
+              }))
             );
-            throw new Error(
-              "Fee still exists after POST request - removal failed. BigCommerce API may not support fee removal."
-            );
+
+            // Check if fee still exists (check all cost fields)
+            const stillExists = verifyFees.some((fee) => {
+              const isShippingInsurance =
+                fee.id === existingFee.id ||
+                fee.name?.toLowerCase() === "shipping insurance" ||
+                fee.display_name?.toLowerCase() === "shipping insurance";
+
+              if (!isShippingInsurance) return false;
+
+              // Check all possible cost fields
+              const cost = fee?.cost || 0;
+              const costIncTax = fee?.cost_inc_tax || 0;
+              const costExTax = fee?.cost_ex_tax || 0;
+              const hasNonZeroCost =
+                cost > 0 || costIncTax > 0 || costExTax > 0;
+
+              if (hasNonZeroCost) {
+                console.log(`⚠️ Fee still exists with non-zero cost:`, {
+                  id: fee.id,
+                  cost,
+                  cost_inc_tax: costIncTax,
+                  cost_ex_tax: costExTax,
+                });
+              }
+
+              return hasNonZeroCost;
+            });
+
+            if (!stillExists) {
+              console.log(
+                "✅ Shipping insurance fee removed successfully via POST"
+              );
+              return {
+                enabled: false,
+                action: "removed",
+                amount: 0,
+                fee: postData,
+              };
+            } else {
+              console.log(
+                "⚠️ POST succeeded but fee still exists after verification, trying cost=$0.01 workaround..."
+              );
+              // Fall through to Strategy 3
+            }
           }
-        } catch (updateError) {
-          console.error(`❌ Failed to minimize fee: ${updateError.message}`);
-          throw new Error(
-            "Fee still exists after POST request - removal failed. BigCommerce API may not support fee removal."
-          );
+        } catch (postError) {
+          console.error(`❌ POST request failed: ${postError.message}`);
+          console.log("⚠️ POST error - skipping to cost=$0.01 workaround...");
+          // Fall through to Strategy 3
         }
       }
 
-      console.log("✅ Shipping insurance fee removed successfully via POST");
-      return {
-        enabled: false,
-        action: "removed",
-        amount: 0,
-        fee: postData,
-      };
+      // Strategy 3: If POST doesn't work or wasn't attempted, set cost to $0.01 (minimum amount)
+      // This effectively "removes" it from the total while keeping the fee object
+      console.log(
+        "⚠️ POST method didn't work or wasn't applicable - trying cost=$0.01 workaround..."
+      );
+
+      const updateUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${existingFee.id}`;
+
+      console.log(`📤 PUT request to set fee cost to $0.01: ${updateUrl}`);
+
+      const updateResponse = await fetchWithTimeout(
+        updateUrl,
+        {
+          method: "PUT",
+          headers: {
+            "X-Auth-Token": ACCESS_TOKEN,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            type: existingFee.type || "custom_fee",
+            name: existingFee.name || "Shipping Insurance",
+            display_name: existingFee.display_name || "Shipping Insurance",
+            cost: 0.01, // Set to minimum amount ($0.01) as workaround
+            source: existingFee.source || "AA",
+            ...(existingFee.tax_class_id !== null &&
+              existingFee.tax_class_id !== undefined && {
+                tax_class_id: existingFee.tax_class_id,
+              }),
+          }),
+        },
+        15000
+      );
+
+      if (updateResponse.ok) {
+        console.log(
+          "✅ Fee cost set to $0.01 as workaround (effectively removed)"
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return {
+          enabled: false,
+          action: "minimized",
+          amount: 0.01,
+          message: "Fee minimized to $0.01 (removal not supported)",
+        };
+      } else {
+        const errorText = await updateResponse.text();
+        console.error(
+          `❌ PUT to minimize fee failed: ${updateResponse.status} - ${errorText}`
+        );
+        throw new Error(
+          "Fee removal failed. BigCommerce API may not support fee removal or updating."
+        );
+      }
     }
   } catch (error) {
     console.error(`❌ Error toggling shipping insurance:`, error.message);
