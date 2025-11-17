@@ -394,22 +394,24 @@ export async function toggleShippingInsuranceFee(
         }
       }
 
-      // Strategy 2: Try DELETE on /fees endpoint (as per BigCommerce documentation)
-      // DELETE /v3/checkouts/{checkoutId}/fees - removes all fees
-      // This is safe when shipping insurance is the only fee
+      // Strategy 2: Try DELETE on specific fee ID first, then all fees
+      // First try: DELETE /v3/checkouts/{checkoutId}/fees/{feeId} - removes specific fee
+      // Fallback: DELETE /v3/checkouts/{checkoutId}/fees - removes all fees
       console.log(
-        "🔄 Strategy 2: Trying DELETE method to remove fees..."
+        "🔄 Strategy 2: Trying DELETE method to remove fee..."
       );
 
-      const deleteUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
-
+      // Try 2a: Delete specific fee by ID
+      const deleteFeeUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${existingFee.id}`;
       console.log(
-        `📤 DELETE request to remove all fees: ${deleteUrl}`
+        `📤 DELETE request to remove specific fee ${existingFee.id}: ${deleteFeeUrl}`
       );
+
+      let deleteSuccess = false;
 
       try {
-        const deleteResponse = await fetchWithTimeout(
-          deleteUrl,
+        const deleteFeeResponse = await fetchWithTimeout(
+          deleteFeeUrl,
           {
             method: "DELETE",
             headers: {
@@ -421,14 +423,77 @@ export async function toggleShippingInsuranceFee(
           15000
         );
 
-        console.log(`📥 DELETE response status: ${deleteResponse.status}`);
+        console.log(`📥 DELETE fee response status: ${deleteFeeResponse.status}`);
 
-        // DELETE returns 204 No Content on success
-        if (deleteResponse.ok || deleteResponse.status === 204) {
-          console.log(`✅ DELETE request successful`);
+        // DELETE returns 204 No Content on success, 404 if already removed
+        if (deleteFeeResponse.ok || deleteFeeResponse.status === 204 || deleteFeeResponse.status === 404) {
+          console.log(`✅ DELETE specific fee request successful (${deleteFeeResponse.status})`);
+          deleteSuccess = true;
+        } else {
+          const errorText = await deleteFeeResponse.text().catch(() => "");
+          console.log(
+            `⚠️ DELETE specific fee returned ${deleteFeeResponse.status}: ${errorText}, trying DELETE all fees...`
+          );
+        }
+      } catch (deleteFeeError) {
+        console.log(
+          `⚠️ DELETE specific fee failed: ${deleteFeeError.message}, trying DELETE all fees...`
+        );
+      }
 
-          // Verify deletion by fetching checkout again (wait for BigCommerce to process)
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+      // Try 2b: If deleting specific fee didn't work, try deleting all fees
+      if (!deleteSuccess) {
+        const deleteAllUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
+        console.log(
+          `📤 DELETE request to remove all fees: ${deleteAllUrl}`
+        );
+
+        try {
+          const deleteAllResponse = await fetchWithTimeout(
+            deleteAllUrl,
+            {
+              method: "DELETE",
+              headers: {
+                "X-Auth-Token": ACCESS_TOKEN,
+                "Content-Type": "application/json",
+                Accept: "application/json",
+              },
+            },
+            15000
+          );
+
+          console.log(`📥 DELETE all fees response status: ${deleteAllResponse.status}`);
+
+          // DELETE returns 204 No Content on success
+          if (deleteAllResponse.ok || deleteAllResponse.status === 204) {
+            console.log(`✅ DELETE all fees request successful`);
+            deleteSuccess = true;
+          } else {
+            const errorText = await deleteAllResponse.text().catch(() => "");
+            console.log(
+              `⚠️ DELETE all fees returned ${deleteAllResponse.status}: ${errorText}`
+            );
+          }
+        } catch (deleteAllError) {
+          console.error(`❌ DELETE all fees request failed: ${deleteAllError.message}`);
+        }
+      }
+
+      // Verify deletion if either DELETE method succeeded
+      if (deleteSuccess) {
+        // Wait longer for BigCommerce to process the deletion
+        console.log("⏳ Waiting for BigCommerce to process deletion...");
+        await new Promise((resolve) => setTimeout(resolve, 3000)); // Increased to 3 seconds
+
+        // Verify multiple times with retries
+        let verified = false;
+        let verificationAttempts = 0;
+        const maxVerificationAttempts = 5;
+
+        while (!verified && verificationAttempts < maxVerificationAttempts) {
+          verificationAttempts++;
+          console.log(`🔍 Verification attempt ${verificationAttempts}/${maxVerificationAttempts}...`);
+
           const verifyCheckout = await getCheckout(checkoutId);
           const verifyFees =
             verifyCheckout?.data?.fees ??
@@ -436,9 +501,20 @@ export async function toggleShippingInsuranceFee(
             verifyCheckout?.fees ??
             [];
 
+          console.log(
+            `🔍 Found ${verifyFees.length} fee(s) after deletion attempt:`,
+            verifyFees.map((f) => ({
+              id: f.id,
+              name: f.name,
+              cost: f.cost,
+              cost_inc_tax: f.cost_inc_tax,
+            }))
+          );
+
           // Check if shipping insurance fee still exists
           const stillExists = verifyFees.some((fee) => {
             const isShippingInsurance =
+              fee.id === existingFee.id ||
               fee.name?.toLowerCase() === "shipping insurance" ||
               fee.display_name?.toLowerCase() === "shipping insurance";
 
@@ -454,6 +530,7 @@ export async function toggleShippingInsuranceFee(
           });
 
           if (!stillExists) {
+            verified = true;
             console.log(
               "✅ Shipping insurance fee verified as removed via DELETE"
             );
@@ -465,20 +542,23 @@ export async function toggleShippingInsuranceFee(
             };
           } else {
             console.log(
-              "⚠️ DELETE succeeded but fee still exists after verification, trying cost=$0.01 workaround..."
+              `⚠️ Fee still exists after attempt ${verificationAttempts}, waiting before retry...`
             );
-            // Fall through to Strategy 3
+            if (verificationAttempts < maxVerificationAttempts) {
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+            }
           }
-        } else {
-          const errorText = await deleteResponse.text().catch(() => "");
+        }
+
+        // If verification failed after all attempts
+        if (!verified) {
           console.log(
-            `⚠️ DELETE returned ${deleteResponse.status}: ${errorText}, trying cost=$0.01 workaround...`
+            "⚠️ DELETE succeeded but fee still exists after all verification attempts, trying cost=$0.01 workaround..."
           );
           // Fall through to Strategy 3
         }
-      } catch (deleteError) {
-        console.error(`❌ DELETE request failed: ${deleteError.message}`);
-        console.log("⚠️ DELETE error - trying cost=$0.01 workaround...");
+      } else {
+        console.log("⚠️ DELETE methods failed, trying cost=$0.01 workaround...");
         // Fall through to Strategy 3
       }
 
