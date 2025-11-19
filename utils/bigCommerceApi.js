@@ -394,24 +394,26 @@ export async function toggleShippingInsuranceFee(
         }
       }
 
-      // Strategy 2: Try DELETE on specific fee ID first, then all fees
-      // First try: DELETE /v3/checkouts/{checkoutId}/fees/{feeId} - removes specific fee
-      // Fallback: DELETE /v3/checkouts/{checkoutId}/fees - removes all fees
+      // Strategy 2: DELETE fees by sending IDs in request body
+      // DELETE /v3/checkouts/{checkoutId}/fees with body: { "ids": ["fee-id"] }
       console.log(
-        "🔄 Strategy 2: Trying DELETE method to remove fee..."
+        "🔄 Strategy 2: Trying DELETE method to remove fee by ID..."
       );
 
-      // Try 2a: Delete specific fee by ID
-      const deleteFeeUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees/${existingFee.id}`;
+      const deleteUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
       console.log(
-        `📤 DELETE request to remove specific fee ${existingFee.id}: ${deleteFeeUrl}`
+        `📤 DELETE request to remove fee ${existingFee.id}: ${deleteUrl}`
+      );
+      console.log(
+        `📤 DELETE request body:`,
+        JSON.stringify({ ids: [existingFee.id] }, null, 2)
       );
 
       let deleteSuccess = false;
 
       try {
-        const deleteFeeResponse = await fetchWithTimeout(
-          deleteFeeUrl,
+        const deleteResponse = await fetchWithTimeout(
+          deleteUrl,
           {
             method: "DELETE",
             headers: {
@@ -419,67 +421,50 @@ export async function toggleShippingInsuranceFee(
               "Content-Type": "application/json",
               Accept: "application/json",
             },
+            body: JSON.stringify({
+              ids: [existingFee.id],
+            }),
           },
           15000
         );
 
-        console.log(`📥 DELETE fee response status: ${deleteFeeResponse.status}`);
+        console.log(`📥 DELETE response status: ${deleteResponse.status}`);
 
-        // DELETE returns 204 No Content on success, 404 if already removed
-        if (deleteFeeResponse.ok || deleteFeeResponse.status === 204 || deleteFeeResponse.status === 404) {
-          console.log(`✅ DELETE specific fee request successful (${deleteFeeResponse.status})`);
+        // DELETE returns 200 with checkout data, 204 No Content, or 404 if already removed
+        if (
+          deleteResponse.ok ||
+          deleteResponse.status === 200 ||
+          deleteResponse.status === 204 ||
+          deleteResponse.status === 404
+        ) {
+          console.log(
+            `✅ DELETE request successful (${deleteResponse.status})`
+          );
+
+          // If 200, try to parse the response (BigCommerce returns checkout data)
+          if (deleteResponse.status === 200) {
+            try {
+              const responseData = await deleteResponse.json();
+              console.log(`📥 DELETE response data:`, responseData);
+            } catch (e) {
+              // Not JSON, that's okay
+            }
+          }
+
           deleteSuccess = true;
         } else {
-          const errorText = await deleteFeeResponse.text().catch(() => "");
+          const errorText = await deleteResponse.text().catch(() => "");
           console.log(
-            `⚠️ DELETE specific fee returned ${deleteFeeResponse.status}: ${errorText}, trying DELETE all fees...`
+            `⚠️ DELETE returned ${deleteResponse.status}: ${errorText}`
           );
         }
-      } catch (deleteFeeError) {
-        console.log(
-          `⚠️ DELETE specific fee failed: ${deleteFeeError.message}, trying DELETE all fees...`
+      } catch (deleteError) {
+        console.error(
+          `❌ DELETE request failed: ${deleteError.message}`
         );
       }
 
-      // Try 2b: If deleting specific fee didn't work, try deleting all fees
-      if (!deleteSuccess) {
-        const deleteAllUrl = `https://api.bigcommerce.com/stores/${STORE_HASH}/v3/checkouts/${checkoutId}/fees`;
-        console.log(
-          `📤 DELETE request to remove all fees: ${deleteAllUrl}`
-        );
-
-        try {
-          const deleteAllResponse = await fetchWithTimeout(
-            deleteAllUrl,
-            {
-              method: "DELETE",
-              headers: {
-                "X-Auth-Token": ACCESS_TOKEN,
-                "Content-Type": "application/json",
-                Accept: "application/json",
-              },
-            },
-            15000
-          );
-
-          console.log(`📥 DELETE all fees response status: ${deleteAllResponse.status}`);
-
-          // DELETE returns 204 No Content on success
-          if (deleteAllResponse.ok || deleteAllResponse.status === 204) {
-            console.log(`✅ DELETE all fees request successful`);
-            deleteSuccess = true;
-          } else {
-            const errorText = await deleteAllResponse.text().catch(() => "");
-            console.log(
-              `⚠️ DELETE all fees returned ${deleteAllResponse.status}: ${errorText}`
-            );
-          }
-        } catch (deleteAllError) {
-          console.error(`❌ DELETE all fees request failed: ${deleteAllError.message}`);
-        }
-      }
-
-      // Verify deletion if either DELETE method succeeded
+      // Verify deletion if DELETE method succeeded
       if (deleteSuccess) {
         // Wait longer for BigCommerce to process the deletion
         console.log("⏳ Waiting for BigCommerce to process deletion...");
